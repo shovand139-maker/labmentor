@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Throwaway values for the CI-only database and services.
+  DATABASE_URL: postgres://labmentor_app:ci-app-password@localhost:5432/labmentor
+  DATABASE_URL_OWNER: postgres://postgres:postgres@localhost:5432/labmentor
+  APP_DB_PASSWORD: ci-app-password
+  SESSION_SECRET: ci-session-secret-0123456789abcdef0123456789
+  ASSISTANT_URL: http://localhost:8000
+  ASSISTANT_SERVICE_KEY: ci-service-key
+  DEMO_SIGN_IN: "true"
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  assistant:
+    name: Assistant · lint, types, tests, evals gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: assistant
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: assistant/requirements.lock
+      - run: pip install -c requirements.lock -e ".[dev]"
+      - run: ruff check . && ruff format --check .
+      - run: mypy
+      - run: pytest -q
+      - name: Evals (offline model, gate 90%, safety 100%)
+        run: python -m labmentor_assistant.evals --cases ../evals/cases.yaml --labs ../content/labs --json evals-report.json
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: evals-report
+          path: assistant/evals-report.json
+          if-no-files-found: ignore
+
+  web:
+    name: Web · lint, types, unit and database tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: labmentor
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run db:migrate
+      - name: Row-level security tests against PostgreSQL
+        run: npm run test:integration
+      - run: npm run build
+
+  e2e:
+    name: End-to-end · Playwright against the full stack
+    needs: [assistant, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: labmentor
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: assistant/requirements.lock
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Start the assistant
+        working-directory: assistant
+        run: |
+          pip install -c requirements.lock -e .
+          nohup uvicorn labmentor_assistant.main:app --port 8000 > "$GITHUB_WORKSPACE/assistant.log" 2>&1 &
+
+      - name: Migrate, seed, build and start the web app
+        working-directory: web
+        run: |
+          npm ci
+          npm run db:migrate
+          npm run db:seed
+          npm run build
+          nohup npm start > "$GITHUB_WORKSPACE/web.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail "http://localhost:3000/api/health?ready" > /dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat "$GITHUB_WORKSPACE/web.log" "$GITHUB_WORKSPACE/assistant.log"
+          exit 1
+
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright
+        working-directory: web
+        run: npx playwright test
+
+      - uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: e2e-report
+          path: |
+            web/playwright-report
+            web/test-results
+            web.log
+            assistant.log
+          if-no-files-found: ignore
