@@ -83,6 +83,25 @@ jobs:
         run: npm run test:integration
       - run: npm run build
 
+  mcp:
+    name: MCP server · types, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   e2e:
     name: End-to-end · Playwright against the full stack
     needs: [assistant, web]

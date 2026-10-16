@@ -9,6 +9,7 @@ Working agreement for anyone changing this repository. Each rule is here because
 | Assistant checks | `cd assistant && ruff check . && ruff format --check . && mypy && pytest` |
 | Evals gate | `cd assistant && python -m labmentor_assistant.evals --cases ../evals/cases.yaml --labs ../content/labs` |
 | Web checks | `cd web && npm run lint && npm run typecheck && npm test` |
+| MCP server | `cd mcp && npm run typecheck && npm test && npm run build` |
 | Database tests | `cd web && npm run db:migrate && npm run test:integration` (needs `DATABASE_URL` and `DATABASE_URL_OWNER`) |
 | End to end | assistant on :8000, `npm run build && npm start` on :3000, then `npx playwright test` |
 
@@ -35,8 +36,13 @@ Database tests are skipped, not passed, without the database variables. A change
 11. Rendered text goes through `RichText`. Never use `dangerouslySetInnerHTML` for content from the database or the model.
 12. Regenerate `web/package-lock.json` with the npm that CI uses (the one bundled with Node 24).
 
+## MCP server
+
+13. MCP tools are read-only and go through the web API with the caller's token. They never read the database directly, so row-level security and role checks stay in one place.
+14. API failures come back as tool results with `isError: true` and a sentence the model can relay, not as protocol errors.
+
 ## Definition of done
 
 1. The behavior change has a test that fails without it.
-2. CI is green: assistant checks and evals, web checks, database tests, build and Playwright.
+2. CI is green: assistant checks and evals, web checks, database tests, build, MCP server tests and Playwright.
 3. If answers change, the eval report in the CI artifacts was read, not just the pass rate.

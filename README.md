@@ -18,6 +18,7 @@ A teaching assistant for hands-on cloud labs. Learners ask questions in their ow
 ```mermaid
 flowchart LR
   B[Browser<br/>React 19] -- "fetch + SSE" --> W[Next.js 16<br/>route handlers, TypeScript]
+  C[Instructor's AI client] -- "MCP over stdio" --> X[LabMentor MCP server] -- "bearer token" --> W
   W -- "Drizzle, one transaction per request<br/>app.tenant_id / app.user_id set" --> P[(PostgreSQL 16<br/>row-level security)]
   W -- "POST /v1/answer (SSE)<br/>lab the caller may read" --> A[Assistant<br/>Python, FastAPI]
   A -- "tool calls" --> M{{Anthropic Claude<br/>Azure OpenAI<br/>offline model}}
@@ -29,6 +30,7 @@ flowchart LR
 | Database | [`web/drizzle/`](web/drizzle) | Drizzle schema and SQL migrations. [`0001_row_level_security.sql`](web/drizzle/0001_row_level_security.sql) holds the policies and least-privilege grants. |
 | Assistant | [`assistant/`](assistant) | FastAPI service: hybrid retrieval (BM25 + hashed n-gram vectors, fused by reciprocal rank), a provider-neutral tool-calling loop, the hint policy and the output checks. |
 | Lab content | [`content/labs/`](content/labs) | Three labs as YAML. The web app seeds its database from these files and the evals read the same files. |
+| MCP server | [`mcp/`](mcp) | Read-only tools for an instructor's AI client (Claude Desktop, VS Code, any MCP client): `list_labs`, `get_lab_guide`, `lab_insights`, `open_questions`. It calls the web API with the instructor's token, so the same tenant isolation applies. |
 | Evals | [`evals/cases.yaml`](evals/cases.yaml) | 29 questions with expected citations, phrases, policies and red-team cases. CI fails below 90%, or on any safety failure. |
 
 ### How a question is answered
@@ -64,6 +66,32 @@ Open http://localhost:3000 and sign in as one of the demo people. Asha and Ben a
 
 To use a hosted model instead of the offline one, start the assistant with `LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY`, or `LLM_PROVIDER=azure-openai` with `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_DEPLOYMENT` (an API key, or the app's managed identity with the `azure` extra).
 
+## Ask about your labs from an AI client
+
+Instructors can connect any MCP client to LabMentor and ask things like "which steps in the Container Apps lab confuse people, and what should I add to the guide?".
+
+```bash
+cd mcp && npm ci && npm run build
+# A token for an instructor (signed with the web app's SESSION_SECRET)
+cd ../web && SESSION_SECRET=... npm run token -- --email priya.nair@contoso.example
+```
+
+Then add the server to the client's configuration, for example in Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "labmentor": {
+      "command": "node",
+      "args": ["/path/to/labmentor/mcp/dist/index.js"],
+      "env": { "LABMENTOR_URL": "http://localhost:3000", "LABMENTOR_TOKEN": "<token>" }
+    }
+  }
+}
+```
+
+The tools are read-only and return what the instructor could see in the app. Hints and solutions never leave the web app, and a learner's token gets a clear error from the insights tools.
+
 ## Tests
 
 | Command | Covers |
@@ -72,6 +100,7 @@ To use a hosted model instead of the offline one, start the assistant with `LLM_
 | `cd assistant && python -m labmentor_assistant.evals --cases ../evals/cases.yaml --labs ../content/labs` | Answer quality and safety on the eval set |
 | `cd web && npm test` | SSE parsing, the text renderer, request validation |
 | `cd web && npm run test:integration` | Row-level security as the application role, against a real database |
+| `cd mcp && npm test` | The MCP tools through a real MCP client over an in-memory transport, with the API faked |
 | `cd web && npx playwright test` | The whole stack in a browser: cited answers, withheld solutions, instructor insights, tenant isolation |
 
 CI runs all of them on every push, with PostgreSQL as a service container.
