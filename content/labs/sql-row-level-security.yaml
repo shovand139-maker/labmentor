@@ -1,0 +1,130 @@
+slug: sql-row-level-security
+title: Isolate tenants in Azure SQL with row-level security
+summary: Store several customers in one table and let the database, not the application, decide which rows each one can see.
+duration_minutes: 60
+tenants: [contoso]
+steps:
+  - title: Connect to the lab database
+    graded: false
+    body: |
+      The lab has created an Azure SQL database named `labdb` for you. Its server name and the SQL login are
+      shown in the **Environment** panel.
+
+      Connect from the lab terminal with `sqlcmd -S <server>.database.windows.net -d labdb -U labadmin -G`.
+      The `-G` switch signs you in with Microsoft Entra ID, so you are prompted in the browser instead of typing
+      a password.
+
+      Run `SELECT DB_NAME();` and check that it prints `labdb`. Type `GO` after each batch.
+    hints:
+      nudge: The server name in the Environment panel already ends in .database.windows.net.
+      hint: If sqlcmd says the command is not found, use the go-sqlcmd build preinstalled at /opt/sqlcmd/sqlcmd.
+
+  - title: Create the orders table
+    graded: false
+    body: |
+      Create a schema named `sales` and a table `sales.Orders` with an `OrderId int IDENTITY PRIMARY KEY`, a
+      `TenantId uniqueidentifier NOT NULL`, a `Customer nvarchar(100) NOT NULL` and an `Amount decimal(10,2) NOT NULL`.
+
+      Then run the insert script in `~/lab/seed-orders.sql`. It adds twelve orders for three tenants. Check the
+      result with `SELECT TenantId, COUNT(*) FROM sales.Orders GROUP BY TenantId;`. You should see three rows
+      with four orders each.
+    hints:
+      nudge: Create the schema in its own batch before the table. CREATE SCHEMA must be the only statement in a batch.
+      hint: Run the seed script with :r ~/lab/seed-orders.sql inside sqlcmd, or pass it with -i when you start sqlcmd.
+
+  - title: Write the predicate function
+    graded: true
+    body: |
+      Row-level security asks a function, for every row, whether the current session may see it. Create an
+      inline table-valued function `security.fn_TenantPredicate(@TenantId uniqueidentifier)` that returns a row
+      only when `@TenantId` matches the tenant stored in the session.
+
+      The application sets the tenant for each connection with `sp_set_session_context`, so the function reads
+      it back with `SESSION_CONTEXT(N'TenantId')`. Create the function `WITH SCHEMABINDING`; a security policy
+      refuses functions without it.
+
+      The checker passes when the function exists, is schema-bound and returns one row for the matching tenant
+      and none for any other.
+    hints:
+      nudge: The function returns a table with a single constant column when the tenant matches.
+      hint: Create the security schema first. Compare @TenantId with CAST(SESSION_CONTEXT(N'TenantId') AS uniqueidentifier) in the WHERE clause.
+      walkthrough: |
+        Run `CREATE SCHEMA security;` in its own batch. Then create the function:
+        `CREATE FUNCTION security.fn_TenantPredicate(@TenantId uniqueidentifier) RETURNS TABLE WITH SCHEMABINDING AS RETURN SELECT 1 AS allowed WHERE @TenantId = CAST(SESSION_CONTEXT(N'TenantId') AS uniqueidentifier);`
+    solution:
+      - CREATE FUNCTION security.fn_TenantPredicate(@TenantId uniqueidentifier) RETURNS TABLE WITH SCHEMABINDING AS RETURN SELECT 1 AS allowed WHERE @TenantId = CAST(SESSION_CONTEXT(N'TenantId') AS uniqueidentifier);
+
+  - title: Turn on the security policy
+    graded: true
+    body: |
+      A security policy attaches the predicate function to a table. Create a policy named
+      `security.TenantIsolation` with a filter predicate on `sales.Orders` that passes the `TenantId` column to
+      your function, and switch it on.
+
+      Once the policy is on, `SELECT COUNT(*) FROM sales.Orders;` returns 0 in a session that has not set a
+      tenant. That is the point: forgetting to set the tenant shows nothing instead of everything.
+    hints:
+      nudge: Filter predicates hide rows from SELECT, UPDATE and DELETE.
+      hint: Use CREATE SECURITY POLICY with ADD FILTER PREDICATE and WITH (STATE = ON).
+      walkthrough: |
+        Run `CREATE SECURITY POLICY security.TenantIsolation ADD FILTER PREDICATE security.fn_TenantPredicate(TenantId) ON sales.Orders WITH (STATE = ON);`
+    solution:
+      - CREATE SECURITY POLICY security.TenantIsolation ADD FILTER PREDICATE security.fn_TenantPredicate(TenantId) ON sales.Orders WITH (STATE = ON);
+
+  - title: Test the isolation
+    graded: false
+    body: |
+      Pick one tenant id from step 2 and set it on your session with
+      `EXEC sp_set_session_context @key = N'TenantId', @value = '<tenant id>', @read_only = 1;`.
+      Now `SELECT * FROM sales.Orders;` returns only that tenant's four orders.
+
+      `@read_only = 1` stops anything later on the same connection from changing the tenant. Applications set it
+      once, right after opening a pooled connection.
+
+      To try another tenant, disconnect and connect again. A read-only session value cannot be overwritten.
+    hints:
+      nudge: The session value lasts until the connection closes.
+
+  - title: Block writes into other tenants
+    graded: true
+    body: |
+      A filter predicate hides other tenants' rows but still lets a session insert a row with someone else's
+      `TenantId`. Add a block predicate to the same policy so that inserts and updates must keep the row in the
+      session's tenant.
+
+      Test it: with the session set to one tenant, inserting an order for a different tenant must fail with
+      error 33504.
+    hints:
+      nudge: Policies can hold filter and block predicates side by side.
+      hint: Use ALTER SECURITY POLICY with ADD BLOCK PREDICATE, once for AFTER INSERT and once for AFTER UPDATE.
+      walkthrough: |
+        Run `ALTER SECURITY POLICY security.TenantIsolation ADD BLOCK PREDICATE security.fn_TenantPredicate(TenantId) ON sales.Orders AFTER INSERT, ADD BLOCK PREDICATE security.fn_TenantPredicate(TenantId) ON sales.Orders AFTER UPDATE;`
+    solution:
+      - ALTER SECURITY POLICY security.TenantIsolation ADD BLOCK PREDICATE security.fn_TenantPredicate(TenantId) ON sales.Orders AFTER INSERT, ADD BLOCK PREDICATE security.fn_TenantPredicate(TenantId) ON sales.Orders AFTER UPDATE;
+
+faq:
+  - question: CREATE SCHEMA fails with "must be the first statement in a query batch"
+    answer: |
+      CREATE SCHEMA has to be alone in its batch. In sqlcmd, type GO on its own line after it, then continue
+      with the next statement.
+
+  - question: Creating the security policy fails with "the function must be schema bound"
+    answer: |
+      Security policies only accept predicate functions created WITH SCHEMABINDING. Drop the function and
+      create it again with WITH SCHEMABINDING after RETURNS TABLE.
+
+  - question: SELECT returns no rows even after setting the tenant
+    answer: |
+      Check the value you passed. SESSION_CONTEXT returns sql_variant, and the predicate casts it to
+      uniqueidentifier, so a typo in the GUID simply matches nothing. Run `SELECT SESSION_CONTEXT(N'TenantId');`
+      to see what the session holds.
+
+  - question: sp_set_session_context fails with "cannot set key, it is read-only"
+    answer: |
+      A read-only value cannot be changed on the same connection. Disconnect, connect again and set the tenant
+      once.
+
+  - question: Error 33504 when inserting an order
+    answer: |
+      That is the block predicate working. The row's TenantId differs from the tenant in your session, so the
+      insert is refused. Set the session to the row's tenant, or insert the row with your session's TenantId.

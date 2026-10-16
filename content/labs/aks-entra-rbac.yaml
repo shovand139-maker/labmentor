@@ -1,0 +1,106 @@
+slug: aks-entra-rbac
+title: Secure an AKS cluster with Microsoft Entra ID and Kubernetes RBAC
+summary: Sign in to a cluster with Entra ID, give a team access to one namespace only, and prove what they can and cannot do.
+duration_minutes: 75
+tenants: [fabrikam]
+steps:
+  - title: Create the cluster
+    graded: false
+    body: |
+      Create a resource group `rg-aks-lab` in `westeurope`, then a small cluster with Entra ID integration and
+      Azure RBAC for Kubernetes authorization:
+      `az aks create --resource-group rg-aks-lab --name aks-lab --node-count 1 --enable-aad --enable-azure-rbac --generate-ssh-keys`.
+
+      Creation takes about five minutes. With `--enable-azure-rbac`, permissions inside the cluster come from Azure
+      role assignments instead of Kubernetes RoleBindings you write by hand.
+    hints:
+      nudge: The resource group must exist before az aks create.
+      hint: If the command reports a quota error, the lab subscription allows Standard_D2s_v5 nodes. Add --node-vm-size Standard_D2s_v5.
+
+  - title: Get credentials and sign in
+    graded: false
+    body: |
+      Download a kubeconfig with `az aks get-credentials --resource-group rg-aks-lab --name aks-lab`. Run
+      `kubelogin convert-kubeconfig -l azurecli` so kubectl reuses your Azure CLI sign-in.
+
+      Check it with `kubectl get nodes`. You see one node in the Ready state.
+    hints:
+      nudge: kubectl needs kubelogin to turn your Entra sign-in into a token the cluster accepts.
+      hint: If kubectl says "You must be logged in to the server", run the kubelogin convert-kubeconfig command again.
+
+  - title: Create the team namespace
+    graded: false
+    body: |
+      Create a namespace for the payments team with `kubectl create namespace payments`. Everything the team
+      deploys goes here, and the next step limits their access to it.
+    hints:
+      nudge: Namespaces are created with kubectl create.
+
+  - title: Give the team write access to their namespace
+    graded: true
+    body: |
+      The lab has created an Entra group named `payments-devs`. Give that group the built-in
+      **Azure Kubernetes Service RBAC Writer** role, scoped to the `payments` namespace only.
+
+      To limit a role assignment to one namespace, set its scope to the cluster's resource id followed by
+      `/namespaces/payments`.
+
+      The checker passes when exactly this role is assigned to the group at the namespace scope, and not at
+      the cluster scope.
+    hints:
+      nudge: The assignment needs three things, the role, the group's object id and the namespace scope.
+      hint: Get the group id with az ad group show --group payments-devs --query id -o tsv and the cluster id with az aks show --query id -o tsv. Use az role assignment create.
+      walkthrough: |
+        Store the ids, then create the assignment:
+        `GROUP_ID=$(az ad group show --group payments-devs --query id -o tsv)`,
+        `AKS_ID=$(az aks show --resource-group rg-aks-lab --name aks-lab --query id -o tsv)`, then
+        `az role assignment create --role "Azure Kubernetes Service RBAC Writer" --assignee $GROUP_ID --scope $AKS_ID/namespaces/payments`.
+    solution:
+      - az role assignment create --role "Azure Kubernetes Service RBAC Writer" --assignee $GROUP_ID --scope $AKS_ID/namespaces/payments
+
+  - title: Prove the boundary
+    graded: true
+    body: |
+      Sign in as the lab user `dev1`, who is a member of `payments-devs`. Show that dev1 can create deployments
+      in `payments` and cannot list pods in `kube-system`.
+
+      Record the two answers from `kubectl auth can-i` in `~/lab/answers.txt`, one per line, as the checker
+      reads that file.
+    hints:
+      nudge: kubectl auth can-i answers yes or no for a verb, a resource and a namespace.
+      hint: Run kubectl auth can-i once for create deployments in payments and once for list pods in kube-system.
+      walkthrough: |
+        Run `kubectl auth can-i create deployments --namespace payments` (yes) and
+        `kubectl auth can-i list pods --namespace kube-system` (no), and write both answers to ~/lab/answers.txt.
+    solution:
+      - kubectl auth can-i create deployments --namespace payments
+      - kubectl auth can-i list pods --namespace kube-system
+
+  - title: Clean up
+    graded: false
+    body: |
+      Delete the lab resources with `az group delete --name rg-aks-lab --yes --no-wait`. The node resource
+      group that AKS created is deleted with it.
+    hints:
+      nudge: One command removes the cluster and its node resource group.
+
+faq:
+  - question: 'kubectl says "error: unknown flag --enable-azure-rbac" or "aad is not enabled"'
+    answer: |
+      Those flags belong to az aks create, not kubectl. If the cluster was already created without them, run
+      `az aks update --resource-group rg-aks-lab --name aks-lab --enable-aad --enable-azure-rbac`.
+
+  - question: Forbidden errors right after creating the role assignment
+    answer: |
+      Azure role assignments can take up to five minutes to reach the cluster. Wait a few minutes and run
+      kubectl again. Clearing the cached token with `kubelogin remove-tokens` also helps.
+
+  - question: az role assignment create fails with "The principal does not exist in the directory"
+    answer: |
+      The assignee must be the group's object id, not its display name. Get it with
+      `az ad group show --group payments-devs --query id -o tsv`.
+
+  - question: kubectl get nodes asks for a device code every time
+    answer: |
+      The kubeconfig still uses device-code sign-in. Run `kubelogin convert-kubeconfig -l azurecli` so kubectl
+      reuses the Azure CLI sign-in instead.

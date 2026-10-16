@@ -1,0 +1,148 @@
+slug: aca-first-container
+title: Deploy your first container to Azure Container Apps
+summary: Create a Container Apps environment, deploy a public sample image, scale it on HTTP traffic and read its logs.
+duration_minutes: 45
+tenants: [contoso, fabrikam]
+steps:
+  - title: Sign in and select the lab subscription
+    graded: false
+    body: |
+      Open the lab terminal and sign in to Azure with `az login --use-device-code`. Follow the device code
+      prompt in a browser tab and sign in with the lab credentials shown in the **Environment** panel, not your
+      work account.
+
+      The lab account can see more than one subscription. Select the one named in the Environment panel with
+      `az account set --subscription "<subscription name>"` and confirm it with `az account show --output table`.
+
+      Every later command runs against this subscription, so check it again if you open a new terminal.
+    hints:
+      nudge: The subscription name is listed in the Environment panel next to your lab username.
+      hint: Run az account list --output table to see every subscription the lab account can use.
+
+  - title: Create a resource group
+    graded: false
+    body: |
+      A resource group holds everything you create in this lab, which makes clean-up a single command.
+
+      Create a resource group named `rg-aca-lab` in the `eastus` region with `az group create --name rg-aca-lab --location eastus`.
+      The command prints the new group as JSON. `"provisioningState": "Succeeded"` means it is ready.
+
+      Use the same name and region in every later step. Resources in another region work, but the checker
+      only looks in `eastus`.
+    hints:
+      nudge: Resource groups are created with the az group command group.
+
+  - title: Create a Container Apps environment
+    graded: true
+    body: |
+      A Container Apps environment is the secure boundary around a group of container apps. Apps in the same
+      environment share a virtual network and write logs to the same Log Analytics workspace.
+
+      Create an environment named `aca-env-lab` in `rg-aca-lab`, in the `eastus` region. Creating an environment
+      takes two to three minutes because it also creates a Log Analytics workspace for you.
+
+      The checker passes when an environment named `aca-env-lab` exists in the resource group and its
+      provisioning state is `Succeeded`.
+    hints:
+      nudge: Environments have their own command group under az containerapp.
+      hint: Use az containerapp env create and pass the environment name, the resource group from step 2 and the eastus location.
+      walkthrough: |
+        Run `az containerapp env create --name aca-env-lab --resource-group rg-aca-lab --location eastus`
+        and wait for the command to finish. Then run
+        `az containerapp env show --name aca-env-lab --resource-group rg-aca-lab --query properties.provisioningState`
+        and check that it prints "Succeeded".
+    solution:
+      - az containerapp env create --name aca-env-lab --resource-group rg-aca-lab --location eastus
+
+  - title: Deploy the sample image
+    graded: true
+    body: |
+      Deploy a container app named `hello-aca` into the `aca-env-lab` environment. Use the public sample image
+      `mcr.microsoft.com/k8se/quickstart:latest`, which serves a web page on port 80.
+
+      The app must accept traffic from the internet, so turn on external ingress and point it at the port the
+      image listens on. When the deployment finishes, the command prints the app's URL. Open it in a browser and
+      you should see the Container Apps welcome page.
+
+      The checker passes when `hello-aca` exists, has external ingress, and its target port is 80.
+    hints:
+      nudge: Creating the app and turning on ingress can happen in one command.
+      hint: Use az containerapp create with --environment, --image, --target-port and --ingress. The image listens on port 80.
+      walkthrough: |
+        Run `az containerapp create --name hello-aca --resource-group rg-aca-lab --environment aca-env-lab
+        --image mcr.microsoft.com/k8se/quickstart:latest --target-port 80 --ingress external`.
+        The output ends with the app's fully qualified domain name. Open it with https://.
+    solution:
+      - az containerapp create --name hello-aca --resource-group rg-aca-lab --environment aca-env-lab --image mcr.microsoft.com/k8se/quickstart:latest --target-port 80 --ingress external
+
+  - title: Scale on HTTP traffic
+    graded: true
+    body: |
+      Container Apps can scale to zero when no one is using an app and add replicas when traffic grows.
+
+      Update `hello-aca` so it runs between 0 and 5 replicas, with an HTTP scale rule named `http-rule` that
+      adds a replica for every 20 concurrent requests.
+
+      Scaling to zero means the first request after a quiet period is slower while a replica starts. That is
+      expected and is called a cold start.
+    hints:
+      nudge: Scale settings belong to the app, so you change them by updating the app.
+      hint: az containerapp update accepts --min-replicas, --max-replicas and the --scale-rule-* options.
+      walkthrough: |
+        Run `az containerapp update --name hello-aca --resource-group rg-aca-lab --min-replicas 0 --max-replicas 5
+        --scale-rule-name http-rule --scale-rule-type http --scale-rule-http-concurrency 20`.
+    solution:
+      - az containerapp update --name hello-aca --resource-group rg-aca-lab --min-replicas 0 --max-replicas 5 --scale-rule-name http-rule --scale-rule-type http --scale-rule-http-concurrency 20
+
+  - title: Read the application logs
+    graded: false
+    body: |
+      Stream the console logs of the running app with `az containerapp logs show --name hello-aca --resource-group rg-aca-lab --follow`.
+      Refresh the app's page a few times and watch the requests appear. Press Ctrl+C to stop streaming.
+
+      If no replica is running because the app scaled to zero, the command waits. Open the app's URL to start a
+      replica and the logs begin to flow.
+    hints:
+      nudge: Logs are under az containerapp logs.
+
+  - title: Clean up
+    graded: false
+    body: |
+      Delete the resource group to remove the environment, the app and the Log Analytics workspace in one go:
+      `az group delete --name rg-aca-lab --yes --no-wait`.
+
+      Deletion continues in the background. The lab ends when you select **Finish**, even if deletion is still
+      running.
+    hints:
+      nudge: Deleting the resource group deletes everything inside it.
+
+faq:
+  - question: The az containerapp command is not found or asks to install an extension
+    answer: |
+      Container Apps commands ship as an Azure CLI extension. Install or update it with
+      `az extension add --name containerapp --upgrade`, then run your command again.
+
+  - question: The environment fails with "The subscription is not registered to use namespace Microsoft.App"
+    answer: |
+      The lab subscription has not used Container Apps before, so its resource providers are not registered.
+      Register both with `az provider register --namespace Microsoft.App` and
+      `az provider register --namespace Microsoft.OperationalInsights`. Registration takes about a minute.
+      Check it with `az provider show --namespace Microsoft.App --query registrationState`.
+
+  - question: ResourceGroupNotFound when creating the environment or the app
+    answer: |
+      The command is looking for the resource group in the current subscription. Check the spelling of
+      `rg-aca-lab`, then run `az account show` to confirm you are in the lab subscription from step 1. A new
+      terminal tab starts in the default subscription again.
+
+  - question: The app URL returns 404 or "upstream connect error"
+    answer: |
+      Ingress is sending traffic to a port the container is not listening on. The quickstart image listens on
+      port 80, so the target port must be 80. Check it with
+      `az containerapp ingress show --name hello-aca --resource-group rg-aca-lab`.
+
+  - question: The first request after a while is slow
+    answer: |
+      With a minimum of zero replicas, Container Apps stops every replica when there is no traffic. The next
+      request waits while a replica starts. This cold start is expected. Set the minimum replicas to 1 if an
+      app must answer immediately.
