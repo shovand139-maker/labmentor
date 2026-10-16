@@ -23,3 +23,6 @@ evals/report.*
 Thumbs.db
 .idea/
 .vscode/
+
+# MCP server build output
+mcp/dist/
